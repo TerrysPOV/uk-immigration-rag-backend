@@ -39,6 +39,8 @@ beautifulsoup4==4.12.3
 lxml>=5.3.0  # Feature 2: HTML/XML parser backend for BeautifulSoup (Python 3.13+ compatible)
 markdown-it-py==3.0.0  # Feature 2: Markdown parsing for heading extraction
 cachetools==5.3.2  # TTL cache for query results
+spacy>=3.7.0  # Feature NEO4J-001: Entity extraction for graph traversals
+en-core-web-lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.0/en_core_web_lg-3.7.0-py3-none-any.whl  # SpaCy large English model
 
 # Rate limiting
 fastapi-limiter>=0.1.5

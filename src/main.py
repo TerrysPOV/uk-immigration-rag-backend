@@ -41,6 +41,7 @@ from src.api.routes.search_history import router as search_history_router
 from src.api.routes.saved_searches import router as saved_searches_router
 from src.api.routes.admin import router as admin_router  # Feature 019: Admin endpoints
 from src.api.routes.template_workflow import router as template_router  # Feature 023: Template Workflow
+from src.api.routes.graph import router as graph_router  # Feature NEO4J-001: Graph traversals
 from src.api.models.rag import ErrorResponse
 from rag.pipelines.haystack_retrieval import create_production_pipeline, HaystackRetrievalPipeline
 from src.services.rag_service import get_rag_service
@@ -128,6 +129,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
         # Set global pipeline for dependency injection
         set_pipeline(pipeline)
+
+        # Initialize Neo4J graph schema if enabled (Feature NEO4J-001)
+        if os.getenv("GRAPH_EXTRACTION_ENABLED", "false").lower() == "true":
+            try:
+                from src.services.neo4j_graph_service import get_graph_service
+
+                neo4j_uri = os.getenv("NEO4J_URI")
+                neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+                neo4j_password = os.getenv("NEO4J_PASSWORD")
+                neo4j_database = os.getenv("NEO4J_DATABASE", "neo4j")
+
+                if neo4j_uri and neo4j_password:
+                    logger.info("Initializing Neo4J graph schema...")
+                    graph_service = get_graph_service(
+                        neo4j_uri=neo4j_uri,
+                        neo4j_user=neo4j_user,
+                        neo4j_password=neo4j_password,
+                        neo4j_database=neo4j_database,
+                    )
+                    graph_service.initialize_schema()
+                    logger.info("✅ Neo4J graph schema initialized")
+                else:
+                    logger.warning("Neo4J credentials not configured, skipping graph initialization")
+            except Exception as e:
+                logger.warning(f"Neo4J initialization failed (non-fatal): {e}")
 
         logger.info("✅ RAG API ready to serve requests")
 
@@ -322,6 +348,9 @@ app.include_router(admin_router)
 
 # Feature 023: Include template workflow endpoints
 app.include_router(template_router)
+
+# Feature NEO4J-001: Include graph traversal endpoints
+app.include_router(graph_router)
 
 
 # ============================================================================
