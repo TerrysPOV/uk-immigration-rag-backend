@@ -1,0 +1,145 @@
+version: '3.8'
+
+# Feature 011: Document Ingestion & Batch Processing
+# Docker Compose configuration for DigitalOcean droplet (161.35.44.166)
+#
+# Services:
+# - FastAPI Backend (ingestion endpoints + WebSocket)
+# - Redis (Celery broker + rate limiting)
+# - Celery Workers (4-10 workers for batch processing)
+# - Authentik (OIDC authentication)
+#
+# Note: PostgreSQL runs natively on host (port 5432)
+
+networks:
+  govuk-infrastructure:
+    external: true
+    name: govuk-infrastructure
+
+services:
+  # Redis - Celery broker + rate limiting
+  redis:
+    image: redis:7-alpine
+    container_name: feature-011-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - govuk-infrastructure
+    ports:
+      - "6379:6379"
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # FastAPI Backend - Ingestion API + WebSocket
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gov-ai-backend:feature-011
+    container_name: feature-011-backend
+    volumes:
+      - /opt/gov-ai/data:/opt/gov-ai/data:ro  # BM25 index and data (read-only)
+    environment:
+      # Python path
+      PYTHONPATH: /app
+
+      # Database
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@host.docker.internal:5432/gov_ai_db
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+
+      # DeepInfra API (for embeddings)
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY}
+
+      # Qdrant Vector DB (running on host)
+      QDRANT_URL: ${QDRANT_URL:-http://host.docker.internal:6333}
+
+      # Encryption (OAuth tokens for cloud drive integration)
+      OAUTH_MASTER_SECRET: ${OAUTH_MASTER_SECRET}
+
+      # DigitalOcean Spaces (object storage)
+      DO_SPACES_KEY: ${DO_SPACES_KEY}
+      DO_SPACES_SECRET: ${DO_SPACES_SECRET}
+      DO_SPACES_ENDPOINT: ${DO_SPACES_ENDPOINT:-https://lon1.digitaloceanspaces.com}
+      DO_SPACES_BUCKET: ${DO_SPACES_BUCKET:-gov-ai-vectorization}
+      DO_SPACES_REGION: ${DO_SPACES_REGION:-lon1}
+
+      # Feature flags
+      RATE_LIMITING_ENABLED: "true"
+      WEBSOCKET_ENABLED: "true"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - govuk-infrastructure
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/rag/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Celery Worker - Batch processing (4 workers)
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gov-ai-backend:feature-011
+    container_name: feature-011-celery-worker
+    working_dir: /app
+    command: celery -A celery_config worker --loglevel=info --concurrency=4 -Q ingestion
+    volumes:
+      - /opt/gov-ai/data:/opt/gov-ai/data:ro  # BM25 index and data (read-only)
+    environment:
+      # Python path
+      PYTHONPATH: /app
+
+      # Database
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@host.docker.internal:5432/gov_ai_db
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+
+      # DeepInfra API
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY}
+
+      # Qdrant Vector DB (running on host)
+      QDRANT_URL: ${QDRANT_URL:-http://host.docker.internal:6333}
+
+      # Encryption (OAuth tokens for cloud drive integration)
+      OAUTH_MASTER_SECRET: ${OAUTH_MASTER_SECRET}
+
+      # DigitalOcean Spaces
+      DO_SPACES_KEY: ${DO_SPACES_KEY}
+      DO_SPACES_SECRET: ${DO_SPACES_SECRET}
+      DO_SPACES_ENDPOINT: ${DO_SPACES_ENDPOINT:-https://lon1.digitaloceanspaces.com}
+      DO_SPACES_BUCKET: ${DO_SPACES_BUCKET:-gov-ai-vectorization}
+      DO_SPACES_REGION: ${DO_SPACES_REGION:-lon1}
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - govuk-infrastructure
+    depends_on:
+      - redis
+      - backend
+    restart: always
+
+
+volumes:
+  redis-data:
+    driver: local

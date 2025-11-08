@@ -1,0 +1,540 @@
+"""
+WebSocket endpoint for real-time processing updates.
+
+Feature 011: Document Ingestion & Batch Processing
+T064: Implement WebSocket endpoint for real-time updates
+T066: RBAC enforcement with Authentik JWT authentication
+"""
+
+import asyncio
+import json
+import logging
+from datetime import datetime
+from typing import Dict, Set
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status, HTTPException
+from fastapi.websockets import WebSocketState
+from pydantic import BaseModel, ValidationError
+
+from src.middleware.rbac import get_current_user_websocket, audit_ingestion_access
+from src.middleware.rate_limiter import (
+    check_websocket_connection_limit,
+    release_websocket_connection,
+)
+
+# Router for WebSocket endpoints
+router = APIRouter(tags=["websocket"])
+
+# Logger
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# WebSocket Message Models
+# ============================================================================
+
+
+class ProgressUpdate(BaseModel):
+    """Processing progress update message"""
+
+    type: str = "progress"
+    job_id: str
+    status: str
+    total_documents: int
+    processed_documents: int
+    failed_documents: int
+    progress_percentage: float
+    eta_seconds: int
+    timestamp: datetime
+
+
+class JobStatusUpdate(BaseModel):
+    """Job status change message"""
+
+    type: str = "status_change"
+    job_id: str
+    old_status: str
+    new_status: str
+    timestamp: datetime
+
+
+class ErrorUpdate(BaseModel):
+    """Error occurrence message"""
+
+    type: str = "error"
+    job_id: str
+    error_id: str
+    document_name: str
+    error_type: str
+    error_message: str
+    timestamp: datetime
+
+
+class WorkerUpdate(BaseModel):
+    """Worker status update"""
+
+    type: str = "worker"
+    active_workers: list[str]
+    timestamp: datetime
+
+
+# ============================================================================
+# Connection Manager
+# ============================================================================
+
+
+class ConnectionManager:
+    """
+    Manage WebSocket connections for real-time updates.
+
+    Features:
+    - Per-job subscriptions (clients subscribe to specific job_id)
+    - Broadcast updates to all subscribers of a job
+    - Authentication via token query parameter
+    - Connection lifecycle management
+    """
+
+    def __init__(self):
+        # Map job_id -> Set of WebSocket connections
+        self.active_connections: Dict[str, Set[WebSocket]] = {}
+        # Track heartbeat tasks
+        self.heartbeat_tasks: Dict[WebSocket, asyncio.Task] = {}
+
+    async def connect(self, websocket: WebSocket, job_id: str):
+        """Accept WebSocket connection and subscribe to job updates"""
+        await websocket.accept()
+
+        if job_id not in self.active_connections:
+            self.active_connections[job_id] = set()
+
+        self.active_connections[job_id].add(websocket)
+
+        # Start heartbeat task
+        task = asyncio.create_task(self._heartbeat(websocket))
+        self.heartbeat_tasks[websocket] = task
+
+        # Send connection confirmation
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "job_id": job_id,
+                "message": f"Subscribed to updates for job {job_id}",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        )
+
+    def disconnect(self, websocket: WebSocket, job_id: str):
+        """Remove WebSocket connection"""
+        if job_id in self.active_connections:
+            self.active_connections[job_id].discard(websocket)
+
+            # Clean up empty job subscriptions
+            if not self.active_connections[job_id]:
+                del self.active_connections[job_id]
+
+        # Cancel heartbeat task
+        if websocket in self.heartbeat_tasks:
+            self.heartbeat_tasks[websocket].cancel()
+            del self.heartbeat_tasks[websocket]
+
+    async def broadcast_to_job(self, job_id: str, message: dict):
+        """
+        Broadcast message to all clients subscribed to a job.
+
+        Args:
+            job_id: Ingestion job ID
+            message: JSON-serializable message
+        """
+        if job_id not in self.active_connections:
+            return
+
+        disconnected = set()
+
+        for connection in self.active_connections[job_id]:
+            try:
+                if connection.client_state == WebSocketState.CONNECTED:
+                    await connection.send_json(message)
+                else:
+                    disconnected.add(connection)
+            except Exception:
+                # Connection failed, mark for removal
+                disconnected.add(connection)
+
+        # Clean up disconnected clients
+        for connection in disconnected:
+            self.disconnect(connection, job_id)
+
+    async def _heartbeat(self, websocket: WebSocket):
+        """
+        Send periodic ping to keep connection alive.
+
+        AWS ALB and nginx have 60s idle timeout.
+        Send ping every 30s to prevent timeout.
+        """
+        try:
+            while websocket.client_state == WebSocketState.CONNECTED:
+                await asyncio.sleep(30)
+                await websocket.send_json(
+                    {"type": "ping", "timestamp": datetime.utcnow().isoformat()}
+                )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            # Connection failed, will be cleaned up
+            pass
+
+
+# Global connection manager
+manager = ConnectionManager()
+
+
+# ============================================================================
+# WebSocket Endpoint
+# ============================================================================
+
+
+@router.websocket("/ws/processing/{job_id}")
+async def processing_updates(
+    websocket: WebSocket,
+    job_id: str,
+    token: str = Query(..., description="Bearer token for authentication"),
+):
+    """
+    WebSocket endpoint for real-time processing updates (T064).
+
+    Features:
+    - Real-time progress updates (FR-038)
+    - Job status changes (FR-039)
+    - Error notifications (FR-040)
+    - Worker status updates (FR-042)
+    - 30s heartbeat to prevent timeout
+    - Per-job subscription model
+    - JWT authentication with Authentik OIDC (T066)
+    - GDPR Article 30 audit logging (T066)
+
+    Authentication:
+    - Query parameter: ?token=Bearer%20<jwt_token>
+    - Token verified against Authentik OIDC
+    - Requires Admin role + canManagePipeline permission
+
+    Message Types:
+    - progress: Job progress update
+    - status_change: Job status transition
+    - error: Processing error occurred
+    - worker: Worker status update
+    - ping: Heartbeat message
+    - connected: Connection confirmation
+
+    Example:
+        ws://api.example.com/ws/processing/job-123?token=Bearer%20abc123
+
+    Returns:
+        WebSocket connection for real-time updates
+    """
+    # Authenticate user via JWT token
+    try:
+        user = await get_current_user_websocket(token)
+        logger.info(f"WebSocket authenticated: {user.username} connecting to job {job_id}")
+    except HTTPException as e:
+        # Authentication failed - close connection with error
+        logger.warning(f"WebSocket authentication failed for job {job_id}: {e.detail}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Authentication failed")
+        return
+
+    # Security Fix (T073): Enforce concurrent WebSocket connection limit (FR-042)
+    if not check_websocket_connection_limit(user.user_id, max_connections=5):
+        logger.warning(
+            f"WebSocket connection limit exceeded for user {user.user_id}",
+            extra={"user_id": user.user_id, "job_id": job_id, "max_connections": 5},
+        )
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Maximum concurrent WebSocket connections exceeded (limit: 5)",
+        )
+        return
+
+    try:
+        # Accept connection and subscribe to job
+        await manager.connect(websocket, job_id)
+
+        # Audit logging for WebSocket connection
+        await audit_ingestion_access(
+            user=user,
+            operation="websocket_connect",
+            resource_type="ingestion_job",
+            resource_id=job_id,
+            success=True,
+        )
+
+        # Keep connection alive, wait for disconnect
+        while True:
+            try:
+                # Receive messages from client (pong responses, etc.)
+                data = await websocket.receive_text()
+
+                # Parse client message
+                try:
+                    message = json.loads(data)
+
+                    # Handle pong response
+                    if message.get("type") == "pong":
+                        continue
+
+                    # Future: Handle other client messages
+                    # (pause job, cancel job, request status)
+
+                except json.JSONDecodeError:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": "Invalid JSON message",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    )
+
+            except WebSocketDisconnect:
+                break
+
+    except Exception as e:
+        # Connection error, clean up
+        pass
+
+    finally:
+        # Clean up connection
+        manager.disconnect(websocket, job_id)
+
+        # Security Fix (T073): Release WebSocket connection slot
+        release_websocket_connection(user.user_id)
+
+
+# ============================================================================
+# Helper Functions for Celery Tasks
+# ============================================================================
+
+
+async def send_progress_update(
+    job_id: str,
+    status: str,
+    total_documents: int,
+    processed_documents: int,
+    failed_documents: int,
+    progress_percentage: float,
+    eta_seconds: int,
+):
+    """
+    Send progress update to all subscribers of a job.
+
+    Call this from Celery tasks:
+        await send_progress_update(
+            job_id="job-123",
+            status="in_progress",
+            total_documents=100,
+            processed_documents=45,
+            failed_documents=2,
+            progress_percentage=45.0,
+            eta_seconds=120
+        )
+    """
+    update = ProgressUpdate(
+        job_id=job_id,
+        status=status,
+        total_documents=total_documents,
+        processed_documents=processed_documents,
+        failed_documents=failed_documents,
+        progress_percentage=progress_percentage,
+        eta_seconds=eta_seconds,
+        timestamp=datetime.utcnow(),
+    )
+
+    await manager.broadcast_to_job(job_id, update.model_dump(mode="json"))
+
+
+async def send_status_change(job_id: str, old_status: str, new_status: str):
+    """
+    Send job status change to all subscribers.
+
+    Call this when job status transitions:
+        await send_status_change(
+            job_id="job-123",
+            old_status="pending",
+            new_status="in_progress"
+        )
+    """
+    update = JobStatusUpdate(
+        job_id=job_id, old_status=old_status, new_status=new_status, timestamp=datetime.utcnow()
+    )
+
+    await manager.broadcast_to_job(job_id, update.model_dump(mode="json"))
+
+
+async def send_error_update(
+    job_id: str, error_id: str, document_name: str, error_type: str, error_message: str
+):
+    """
+    Send error notification to all subscribers.
+
+    Call this when processing error occurs:
+        await send_error_update(
+            job_id="job-123",
+            error_id="err-456",
+            document_name="policy.pdf",
+            error_type="parsing",
+            error_message="PDF parsing failed: encrypted"
+        )
+    """
+    update = ErrorUpdate(
+        job_id=job_id,
+        error_id=error_id,
+        document_name=document_name,
+        error_type=error_type,
+        error_message=error_message,
+        timestamp=datetime.utcnow(),
+    )
+
+    await manager.broadcast_to_job(job_id, update.model_dump(mode="json"))
+
+
+async def send_worker_update(job_id: str, active_workers: list[str]):
+    """
+    Send worker status update to all subscribers.
+
+    Call this when worker status changes:
+        await send_worker_update(
+            job_id="job-123",
+            active_workers=["worker1@host", "worker2@host"]
+        )
+    """
+    update = WorkerUpdate(active_workers=active_workers, timestamp=datetime.utcnow())
+
+    await manager.broadcast_to_job(job_id, update.model_dump(mode="json"))
+
+
+# ============================================================================
+# T042: Analytics Metrics WebSocket Endpoint
+# ============================================================================
+
+
+@router.websocket("/ws/analytics/metrics")
+async def analytics_metrics(
+    websocket: WebSocket, token: str = Query(..., description="Bearer token for authentication")
+):
+    """
+    WebSocket endpoint for real-time analytics metrics (T042).
+
+    Features:
+    - Real-time system metrics broadcast every 30s (FR-AD-008)
+    - JWT authentication with Authentik OIDC
+    - Exponential backoff reconnection logic
+    - Connection limit per user (max 3 concurrent connections)
+    - Auto cleanup on disconnect
+
+    Authentication:
+    - Query parameter: ?token=Bearer%20<jwt_token>
+    - Token verified against Authentik OIDC
+    - Requires Admin role
+
+    Message Format:
+    {
+        "type": "metrics_update",
+        "timestamp": "2025-10-15T12:34:56Z",
+        "data": {
+            "cpu": {"percent": 45.2, "status": "healthy"},
+            "memory": {"percent": 62.1, "used_mb": 8192, "total_mb": 16384, "status": "healthy"},
+            "storage": {"percent": 55.3, "used_gb": 100.5, "total_gb": 200.0, "status": "healthy"},
+            "database_connections": {"active": 15, "max": 100, "percent": 15.0, "status": "healthy"},
+            "websocket_connections": {"active": 5, "status": "healthy"}
+        }
+    }
+
+    Example:
+        ws://api.example.com/ws/analytics/metrics?token=Bearer%20abc123
+
+    Returns:
+        WebSocket connection for real-time metrics updates
+    """
+    from src.websocket.metrics_manager import metrics_ws_manager
+
+    # Authenticate user via JWT token
+    try:
+        user = await get_current_user_websocket(token)
+        logger.info(f"Analytics WebSocket authenticated: {user.username}")
+    except HTTPException as e:
+        logger.warning(f"Analytics WebSocket authentication failed: {e.detail}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Authentication failed")
+        return
+
+    # Security Fix (T073): Enforce concurrent WebSocket connection limit
+    if not check_websocket_connection_limit(user.user_id, max_connections=3):
+        logger.warning(
+            f"Analytics WebSocket connection limit exceeded for user {user.user_id}",
+            extra={"user_id": user.user_id, "max_connections": 3},
+        )
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Maximum concurrent WebSocket connections exceeded (limit: 3)",
+        )
+        return
+
+    try:
+        # Connect to metrics manager
+        connection_id = await metrics_ws_manager.connect(websocket, user.user_id, token)
+
+        logger.info(
+            f"Analytics WebSocket connected: user={user.username}, connection_id={connection_id}"
+        )
+
+        # Keep connection alive, wait for disconnect
+        while True:
+            try:
+                # Receive messages from client (pong responses, etc.)
+                data = await websocket.receive_text()
+
+                # Parse client message
+                try:
+                    message = json.loads(data)
+
+                    # Handle pong response
+                    if message.get("type") == "pong":
+                        continue
+
+                    # Future: Handle other client messages
+
+                except json.JSONDecodeError:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": "Invalid JSON message",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    )
+
+            except WebSocketDisconnect:
+                break
+
+    except Exception as e:
+        logger.error(f"Analytics WebSocket error: {str(e)}")
+
+    finally:
+        # Clean up connection
+        await metrics_ws_manager.disconnect(connection_id)
+
+        # Release WebSocket connection slot
+        release_websocket_connection(user.user_id)
+
+        logger.info(
+            f"Analytics WebSocket disconnected: user={user.username}, connection_id={connection_id}"
+        )
+
+
+# ============================================================================
+# Module Exports
+# ============================================================================
+
+__all__ = [
+    "router",
+    "manager",
+    "send_progress_update",
+    "send_status_change",
+    "send_error_update",
+    "send_worker_update",
+    "analytics_metrics",  # T042 export
+]

@@ -1,0 +1,481 @@
+"""
+Cloud drive sync service with OAuth 2.0 integration.
+
+Feature 011: Document Ingestion & Batch Processing
+T038: Cloud sync for Google Drive, OneDrive, SharePoint with OAuth and deduplication
+"""
+
+import hashlib
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+from enum import Enum
+
+import httpx
+
+from models.cloud_drive_connection import CloudProvider
+
+
+class SyncResult(Enum):
+    """Sync operation result"""
+    SUCCESS = "success"
+    DUPLICATE = "duplicate"
+    FAILED = "failed"
+
+
+class CloudSyncService:
+    """
+    Service for syncing documents from cloud drive providers.
+
+    Features:
+    - Google Drive, OneDrive, SharePoint OAuth integration (FR-020, FR-021)
+    - Folder selection and document discovery (FR-023)
+    - Token refresh on expiry (FR-025)
+    - Duplicate detection via content hash (FR-027)
+    - Sync progress tracking (FR-026)
+    """
+
+    def __init__(self):
+        self.synced_hashes = set()  # Track synced content hashes
+
+    async def sync_folder(
+        self,
+        provider: CloudProvider,
+        access_token: str,
+        folder_id: str,
+        refresh_token: Optional[str] = None
+    ) -> Dict:
+        """
+        Sync all documents from a cloud drive folder.
+
+        Args:
+            provider: Cloud provider (Google Drive, OneDrive, SharePoint)
+            access_token: OAuth access token
+            folder_id: Folder ID to sync from
+            refresh_token: Optional refresh token for token renewal
+
+        Returns:
+            Dict with:
+            - synced_files: List of synced file objects
+            - duplicate_files: List of duplicate file names
+            - failed_files: List of failed files with error messages
+            - total_synced: Count of successfully synced files
+            - needs_refresh: True if token needs refresh
+        """
+        if provider == CloudProvider.GOOGLE_DRIVE:
+            return await self._sync_google_drive(
+                access_token, folder_id, refresh_token
+            )
+        elif provider == CloudProvider.ONEDRIVE:
+            return await self._sync_onedrive(
+                access_token, folder_id, refresh_token
+            )
+        elif provider == CloudProvider.SHAREPOINT:
+            return await self._sync_sharepoint(
+                access_token, folder_id, refresh_token
+            )
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
+
+    async def _sync_google_drive(
+        self,
+        access_token: str,
+        folder_id: str,
+        refresh_token: Optional[str]
+    ) -> Dict:
+        """
+        Sync documents from Google Drive folder.
+
+        API Docs: https://developers.google.com/drive/api/v3/reference/files/list
+        """
+        synced_files = []
+        duplicate_files = []
+        failed_files = []
+
+        async with httpx.AsyncClient() as client:
+            # List files in folder
+            headers = {'Authorization': f'Bearer {access_token}'}
+
+            params = {
+                'q': f"'{folder_id}' in parents and trashed=false",
+                'fields': 'files(id, name, mimeType, size, modifiedTime)',
+                'pageSize': 100
+            }
+
+            try:
+                response = await client.get(
+                    'https://www.googleapis.com/drive/v3/files',
+                    headers=headers,
+                    params=params,
+                    timeout=30.0
+                )
+
+                if response.status_code == 401:
+                    # Token expired (FR-025)
+                    return {
+                        'synced_files': synced_files,
+                        'duplicate_files': duplicate_files,
+                        'failed_files': failed_files,
+                        'total_synced': 0,
+                        'needs_refresh': True
+                    }
+
+                response.raise_for_status()
+                files_data = response.json()
+
+                # Download and process each file
+                for file_meta in files_data.get('files', []):
+                    file_id = file_meta['id']
+                    file_name = file_meta['name']
+
+                    # Download file content
+                    download_response = await client.get(
+                        f'https://www.googleapis.com/drive/v3/files/{file_id}?alt=media',
+                        headers=headers,
+                        timeout=60.0
+                    )
+
+                    if download_response.status_code == 200:
+                        content = download_response.content
+
+                        # Calculate content hash for deduplication (FR-027)
+                        content_hash = hashlib.sha256(content).hexdigest()
+
+                        if content_hash in self.synced_hashes:
+                            duplicate_files.append(file_name)
+                        else:
+                            self.synced_hashes.add(content_hash)
+                            synced_files.append({
+                                'filename': file_name,
+                                'content': content,
+                                'content_hash': content_hash,
+                                'content_type': file_meta.get('mimeType'),
+                                'file_size_bytes': int(file_meta.get('size', 0)),
+                                'modified_time': file_meta.get('modifiedTime'),
+                                'provider': CloudProvider.GOOGLE_DRIVE.value,
+                                'file_id': file_id
+                            })
+                    else:
+                        failed_files.append({
+                            'filename': file_name,
+                            'error': f"Failed to download: HTTP {download_response.status_code}"
+                        })
+
+            except httpx.HTTPError as e:
+                failed_files.append({
+                    'filename': 'folder_listing',
+                    'error': f"API error: {e}"
+                })
+
+        return {
+            'synced_files': synced_files,
+            'duplicate_files': duplicate_files,
+            'failed_files': failed_files,
+            'total_synced': len(synced_files),
+            'needs_refresh': False
+        }
+
+    async def _sync_onedrive(
+        self,
+        access_token: str,
+        folder_id: str,
+        refresh_token: Optional[str]
+    ) -> Dict:
+        """
+        Sync documents from OneDrive folder.
+
+        API Docs: https://docs.microsoft.com/en-us/graph/api/driveitem-list-children
+        """
+        synced_files = []
+        duplicate_files = []
+        failed_files = []
+
+        async with httpx.AsyncClient() as client:
+            # List files in folder
+            headers = {'Authorization': f'Bearer {access_token}'}
+
+            try:
+                response = await client.get(
+                    f'https://graph.microsoft.com/v1.0/me/drive/items/{folder_id}/children',
+                    headers=headers,
+                    timeout=30.0
+                )
+
+                if response.status_code == 401:
+                    # Token expired (FR-025)
+                    return {
+                        'synced_files': synced_files,
+                        'duplicate_files': duplicate_files,
+                        'failed_files': failed_files,
+                        'total_synced': 0,
+                        'needs_refresh': True
+                    }
+
+                response.raise_for_status()
+                files_data = response.json()
+
+                # Download and process each file
+                for item in files_data.get('value', []):
+                    # Skip folders
+                    if 'folder' in item:
+                        continue
+
+                    file_name = item['name']
+                    download_url = item.get('@microsoft.graph.downloadUrl')
+
+                    if not download_url:
+                        failed_files.append({
+                            'filename': file_name,
+                            'error': 'No download URL available'
+                        })
+                        continue
+
+                    # Download file content
+                    download_response = await client.get(
+                        download_url,
+                        timeout=60.0
+                    )
+
+                    if download_response.status_code == 200:
+                        content = download_response.content
+
+                        # Calculate content hash for deduplication (FR-027)
+                        content_hash = hashlib.sha256(content).hexdigest()
+
+                        if content_hash in self.synced_hashes:
+                            duplicate_files.append(file_name)
+                        else:
+                            self.synced_hashes.add(content_hash)
+                            synced_files.append({
+                                'filename': file_name,
+                                'content': content,
+                                'content_hash': content_hash,
+                                'content_type': item.get('file', {}).get('mimeType'),
+                                'file_size_bytes': item.get('size', 0),
+                                'modified_time': item.get('lastModifiedDateTime'),
+                                'provider': CloudProvider.ONEDRIVE.value,
+                                'file_id': item['id']
+                            })
+                    else:
+                        failed_files.append({
+                            'filename': file_name,
+                            'error': f"Failed to download: HTTP {download_response.status_code}"
+                        })
+
+            except httpx.HTTPError as e:
+                failed_files.append({
+                    'filename': 'folder_listing',
+                    'error': f"API error: {e}"
+                })
+
+        return {
+            'synced_files': synced_files,
+            'duplicate_files': duplicate_files,
+            'failed_files': failed_files,
+            'total_synced': len(synced_files),
+            'needs_refresh': False
+        }
+
+    async def _sync_sharepoint(
+        self,
+        access_token: str,
+        folder_id: str,
+        refresh_token: Optional[str]
+    ) -> Dict:
+        """
+        Sync documents from SharePoint folder.
+
+        API Docs: https://docs.microsoft.com/en-us/graph/api/driveitem-list-children
+        (SharePoint uses same Microsoft Graph API as OneDrive)
+        """
+        # SharePoint uses the same Microsoft Graph API as OneDrive
+        # Only difference is the endpoint path (sites instead of me/drive)
+
+        synced_files = []
+        duplicate_files = []
+        failed_files = []
+
+        async with httpx.AsyncClient() as client:
+            # Note: folder_id should be in format "site_id,drive_id,item_id"
+            parts = folder_id.split(',')
+            if len(parts) != 3:
+                return {
+                    'synced_files': [],
+                    'duplicate_files': [],
+                    'failed_files': [{'filename': 'folder_id', 'error': 'Invalid SharePoint folder ID format'}],
+                    'total_synced': 0,
+                    'needs_refresh': False
+                }
+
+            site_id, drive_id, item_id = parts
+
+            # List files in folder
+            headers = {'Authorization': f'Bearer {access_token}'}
+
+            try:
+                response = await client.get(
+                    f'https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/items/{item_id}/children',
+                    headers=headers,
+                    timeout=30.0
+                )
+
+                if response.status_code == 401:
+                    # Token expired (FR-025)
+                    return {
+                        'synced_files': synced_files,
+                        'duplicate_files': duplicate_files,
+                        'failed_files': failed_files,
+                        'total_synced': 0,
+                        'needs_refresh': True
+                    }
+
+                response.raise_for_status()
+                files_data = response.json()
+
+                # Download and process each file
+                for item in files_data.get('value', []):
+                    # Skip folders
+                    if 'folder' in item:
+                        continue
+
+                    file_name = item['name']
+                    download_url = item.get('@microsoft.graph.downloadUrl')
+
+                    if not download_url:
+                        failed_files.append({
+                            'filename': file_name,
+                            'error': 'No download URL available'
+                        })
+                        continue
+
+                    # Download file content
+                    download_response = await client.get(
+                        download_url,
+                        timeout=60.0
+                    )
+
+                    if download_response.status_code == 200:
+                        content = download_response.content
+
+                        # Calculate content hash for deduplication (FR-027)
+                        content_hash = hashlib.sha256(content).hexdigest()
+
+                        if content_hash in self.synced_hashes:
+                            duplicate_files.append(file_name)
+                        else:
+                            self.synced_hashes.add(content_hash)
+                            synced_files.append({
+                                'filename': file_name,
+                                'content': content,
+                                'content_hash': content_hash,
+                                'content_type': item.get('file', {}).get('mimeType'),
+                                'file_size_bytes': item.get('size', 0),
+                                'modified_time': item.get('lastModifiedDateTime'),
+                                'provider': CloudProvider.SHAREPOINT.value,
+                                'file_id': item['id']
+                            })
+                    else:
+                        failed_files.append({
+                            'filename': file_name,
+                            'error': f"Failed to download: HTTP {download_response.status_code}"
+                        })
+
+            except httpx.HTTPError as e:
+                failed_files.append({
+                    'filename': 'folder_listing',
+                    'error': f"API error: {e}"
+                })
+
+        return {
+            'synced_files': synced_files,
+            'duplicate_files': duplicate_files,
+            'failed_files': failed_files,
+            'total_synced': len(synced_files),
+            'needs_refresh': False
+        }
+
+    async def list_folders(
+        self,
+        provider: CloudProvider,
+        access_token: str
+    ) -> List[Dict]:
+        """
+        List available folders for folder selection (FR-023).
+
+        Returns:
+            List of folder objects with id, name, path
+        """
+        if provider == CloudProvider.GOOGLE_DRIVE:
+            return await self._list_google_drive_folders(access_token)
+        elif provider == CloudProvider.ONEDRIVE:
+            return await self._list_onedrive_folders(access_token)
+        elif provider == CloudProvider.SHAREPOINT:
+            return await self._list_sharepoint_folders(access_token)
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
+
+    async def _list_google_drive_folders(self, access_token: str) -> List[Dict]:
+        """List folders from Google Drive"""
+        async with httpx.AsyncClient() as client:
+            headers = {'Authorization': f'Bearer {access_token}'}
+            params = {
+                'q': "mimeType='application/vnd.google-apps.folder' and trashed=false",
+                'fields': 'files(id, name)',
+                'pageSize': 100
+            }
+
+            response = await client.get(
+                'https://www.googleapis.com/drive/v3/files',
+                headers=headers,
+                params=params,
+                timeout=30.0
+            )
+
+            response.raise_for_status()
+            folders_data = response.json()
+
+            return [
+                {'id': folder['id'], 'name': folder['name'], 'path': folder['name']}
+                for folder in folders_data.get('files', [])
+            ]
+
+    async def _list_onedrive_folders(self, access_token: str) -> List[Dict]:
+        """List folders from OneDrive"""
+        async with httpx.AsyncClient() as client:
+            headers = {'Authorization': f'Bearer {access_token}'}
+
+            response = await client.get(
+                'https://graph.microsoft.com/v1.0/me/drive/root/children',
+                headers=headers,
+                timeout=30.0
+            )
+
+            response.raise_for_status()
+            items_data = response.json()
+
+            return [
+                {'id': item['id'], 'name': item['name'], 'path': item['name']}
+                for item in items_data.get('value', [])
+                if 'folder' in item
+            ]
+
+    async def _list_sharepoint_folders(self, access_token: str) -> List[Dict]:
+        """List folders from SharePoint (requires site ID)"""
+        # Note: This is simplified. Production should:
+        # 1. List sites the user has access to
+        # 2. List document libraries in each site
+        # 3. List folders in each library
+
+        # For now, return empty list (requires more complex site discovery)
+        return []
+
+    def check_duplicate(self, content_hash: str) -> bool:
+        """
+        Check if content hash was already synced (FR-027).
+
+        Args:
+            content_hash: SHA-256 hash of document content
+
+        Returns:
+            True if duplicate detected
+        """
+        return content_hash in self.synced_hashes

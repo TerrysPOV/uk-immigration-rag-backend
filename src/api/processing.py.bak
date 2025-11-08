@@ -1,0 +1,396 @@
+"""
+Processing API endpoints for monitoring and history.
+
+Feature 011: Document Ingestion & Batch Processing
+T044-T045: Processing status and history endpoints
+T066: RBAC enforcement with Authentik JWT authentication
+"""
+
+from datetime import datetime
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from models.ingestion_job import IngestionJob, IngestionStatus
+from models.processing_job import ProcessingJob, ProcessingStatus
+from models.ingestion_error import IngestionError, ErrorType
+from services.batch_processor import BatchProcessorService
+from middleware.rbac import (
+    User,
+    get_current_user,
+    require_admin_pipeline_permission,
+    audit_ingestion_access
+)
+
+# Router for processing endpoints
+router = APIRouter(prefix="/api/v1/processing", tags=["processing"])
+
+
+# ============================================================================
+# Response Models
+# ============================================================================
+
+class QueueStatusResponse(BaseModel):
+    """Queue status summary"""
+    pending_count: int
+    in_progress_count: int
+    completed_count: int
+    failed_count: int
+
+
+class ProcessingJobResponse(BaseModel):
+    """Processing job details"""
+    processing_job_id: str
+    document_id: str
+    worker_id: Optional[str]
+    status: str
+    progress: float
+    error_message: Optional[str]
+    start_time: Optional[datetime]
+    end_time: Optional[datetime]
+    eta_seconds: int
+
+    class Config:
+        from_attributes = True
+
+
+class IngestionErrorResponse(BaseModel):
+    """Ingestion error details"""
+    error_id: str
+    document_name: str
+    error_type: str
+    error_message: str
+    timestamp: datetime
+    resolved: bool
+
+    class Config:
+        from_attributes = True
+
+
+class ProcessingStatusResponse(BaseModel):
+    """Full processing status"""
+    job_id: str
+    status: str
+    total_documents: int
+    processed_documents: int
+    failed_documents: int
+    progress_percentage: float
+    eta_seconds: int
+    queue_status: QueueStatusResponse
+    active_jobs: List[ProcessingJobResponse]
+    errors: List[IngestionErrorResponse]
+    active_workers: List[str]
+
+
+class IngestionJobHistoryResponse(BaseModel):
+    """Ingestion job summary for history"""
+    job_id: str
+    user_id: str
+    method: str
+    status: str
+    total_documents: int
+    processed_documents: int
+    failed_documents: int
+    start_time: datetime
+    end_time: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# Dependencies
+# ============================================================================
+
+def get_db() -> Session:
+    """Database session dependency"""
+    from database import SessionLocal
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ============================================================================
+# T044: GET /api/v1/processing/status
+# ============================================================================
+
+@router.get("/status", response_model=ProcessingStatusResponse)
+async def get_processing_status(
+    request: Request,
+    job_id: str = Query(..., description="Ingestion job ID"),
+    user: User = Depends(require_admin_pipeline_permission),
+    db: Session = Depends(get_db)
+):
+    """
+    Get real-time processing status for a job (T044).
+
+    Features:
+    - Queue status (pending/in-progress/completed counts) (FR-037)
+    - Active jobs with progress and ETA (FR-038)
+    - Worker status (FR-042)
+    - Processing errors (FR-040)
+    - Real-time updates via WebSocket (separate endpoint)
+    - RBAC enforcement (FR-001, FR-002)
+    - GDPR Article 30 audit logging (T066)
+
+    Returns:
+        200: Processing status retrieved
+        403: Missing permissions
+        404: Job not found
+    """
+    # Audit logging
+    await audit_ingestion_access(
+        user=user,
+        operation="view_processing_status",
+        resource_type="ingestion_job",
+        resource_id=job_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+        db=db
+    )
+
+    # Get ingestion job
+    ingestion_job = db.query(IngestionJob).filter_by(
+        job_id=job_id
+    ).first()
+
+    if not ingestion_job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Ingestion job not found: {job_id}"
+        )
+
+    # Verify user owns the job or is admin
+    if ingestion_job.user_id != user.user_id and 'Admin' not in user.roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only view your own jobs"
+        )
+
+    # Get processing status from batch processor
+    batch_processor = BatchProcessorService(celery_app=None, db_session=db)
+
+    status_data = await batch_processor.get_processing_status(
+        ingestion_job_id=job_id
+    )
+
+    # Get processing jobs for detailed view
+    processing_jobs = db.query(ProcessingJob).filter_by(
+        ingestion_job_id=job_id
+    ).filter(
+        ProcessingJob.status.in_([ProcessingStatus.PROCESSING])
+    ).limit(20).all()
+
+    # Get recent errors
+    errors = db.query(IngestionError).filter_by(
+        ingestion_job_id=job_id,
+        resolved=False
+    ).order_by(
+        IngestionError.timestamp.desc()
+    ).limit(10).all()
+
+    # Build response
+    return ProcessingStatusResponse(
+        job_id=job_id,
+        status=status_data['status'],
+        total_documents=status_data['total_documents'],
+        processed_documents=status_data['processed_documents'],
+        failed_documents=status_data['failed_documents'],
+        progress_percentage=status_data['progress_percentage'],
+        eta_seconds=status_data['eta_seconds'],
+        queue_status=QueueStatusResponse(
+            pending_count=status_data['queue_status']['pending'],
+            in_progress_count=status_data['queue_status']['processing'],
+            completed_count=status_data['queue_status']['completed'],
+            failed_count=status_data['queue_status']['failed']
+        ),
+        active_jobs=[
+            ProcessingJobResponse(
+                processing_job_id=job.processing_job_id,
+                document_id=job.document_id,
+                worker_id=job.worker_id,
+                status=job.status.value,
+                progress=job.progress,
+                error_message=job.error_message,
+                start_time=job.start_time,
+                end_time=job.end_time,
+                eta_seconds=job.eta_seconds
+            )
+            for job in processing_jobs
+        ],
+        errors=[
+            IngestionErrorResponse(
+                error_id=error.error_id,
+                document_name=error.document_name,
+                error_type=error.error_type.value,
+                error_message=error.error_message,
+                timestamp=error.timestamp,
+                resolved=error.resolved
+            )
+            for error in errors
+        ],
+        active_workers=status_data['active_workers']
+    )
+
+
+# ============================================================================
+# T045: GET /api/v1/processing/history
+# ============================================================================
+
+@router.get("/history", response_model=List[IngestionJobHistoryResponse])
+async def get_processing_history(
+    request: Request,
+    status_filter: str = Query(
+        "all",
+        description="Filter by status",
+        regex="^(all|success|failed|in-progress)$"
+    ),
+    limit: int = Query(
+        50,
+        description="Maximum number of jobs to return",
+        ge=1,
+        le=50
+    ),
+    user: User = Depends(require_admin_pipeline_permission),
+    db: Session = Depends(get_db)
+):
+    """
+    Get last 50 processing jobs per user (T045).
+
+    Features:
+    - Last 50 jobs per user (FR-041)
+    - Status filter (all/success/failed/in-progress) (FR-049)
+    - Timestamp DESC ordering (most recent first)
+    - RBAC enforcement (FR-001, FR-002)
+    - GDPR Article 30 audit logging (T066)
+
+    Returns:
+        200: Processing history retrieved
+        403: Missing permissions
+    """
+    # Audit logging
+    await audit_ingestion_access(
+        user=user,
+        operation="view_processing_history",
+        resource_type="ingestion_history",
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+        db=db
+    )
+
+    # Build query
+    query = db.query(IngestionJob).filter_by(
+        user_id=user.user_id
+    )
+
+    # Apply status filter (FR-049)
+    if status_filter == 'success':
+        query = query.filter(IngestionJob.status == IngestionStatus.COMPLETED)
+    elif status_filter == 'failed':
+        query = query.filter(IngestionJob.status == IngestionStatus.FAILED)
+    elif status_filter == 'in-progress':
+        query = query.filter(IngestionJob.status == IngestionStatus.IN_PROGRESS)
+    # 'all' means no additional filter
+
+    # Order by timestamp DESC (most recent first)
+    query = query.order_by(IngestionJob.created_at.desc())
+
+    # Limit to 50 (FR-041)
+    jobs = query.limit(limit).all()
+
+    # Build response
+    return [
+        IngestionJobHistoryResponse(
+            job_id=job.job_id,
+            user_id=job.user_id,
+            method=job.method.value,
+            status=job.status.value,
+            total_documents=job.total_documents,
+            processed_documents=job.processed_documents,
+            failed_documents=job.failed_documents,
+            start_time=job.created_at,
+            end_time=job.updated_at if job.status in [
+                IngestionStatus.COMPLETED,
+                IngestionStatus.FAILED,
+                IngestionStatus.CANCELLED
+            ] else None
+        )
+        for job in jobs
+    ]
+
+
+# ============================================================================
+# Retry Failed Jobs Endpoint
+# ============================================================================
+
+@router.post("/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_failed_jobs(
+    request: Request,
+    job_id: str = Query(..., description="Ingestion job ID"),
+    processing_job_ids: Optional[List[str]] = Query(
+        None,
+        description="Specific processing job IDs to retry (empty = retry all failed)"
+    ),
+    user: User = Depends(require_admin_pipeline_permission),
+    db: Session = Depends(get_db)
+):
+    """
+    Retry failed processing jobs (FR-045, FR-046).
+
+    RBAC: Admin + canManagePipeline (FR-001, FR-002)
+    Audit: GDPR Article 30 compliant (T066)
+
+    Returns:
+        202: Retry initiated
+        403: Missing permissions
+        404: Job not found
+    """
+    # Audit logging
+    await audit_ingestion_access(
+        user=user,
+        operation="retry_failed_jobs",
+        resource_type="ingestion_job",
+        resource_id=job_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+        db=db
+    )
+
+    # Get ingestion job
+    ingestion_job = db.query(IngestionJob).filter_by(
+        job_id=job_id
+    ).first()
+
+    if not ingestion_job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Ingestion job not found: {job_id}"
+        )
+
+    # Verify user owns the job
+    if ingestion_job.user_id != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only retry your own jobs"
+        )
+
+    # Retry failed jobs
+    batch_processor = BatchProcessorService(celery_app=None, db_session=db)
+
+    retry_result = await batch_processor.retry_failed_jobs(
+        ingestion_job_id=job_id,
+        job_ids=processing_job_ids
+    )
+
+    return {
+        'message': f"Retrying {retry_result['retried_count']} failed jobs",
+        'retried_count': retry_result['retried_count'],
+        'job_ids': retry_result['job_ids']
+    }

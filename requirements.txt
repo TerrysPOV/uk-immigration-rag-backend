@@ -1,0 +1,76 @@
+# FastAPI and ASGI server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Authentication and security
+passlib[argon2]>=1.7.4
+python-jose[cryptography]>=3.3.0
+pyotp>=2.9.0
+authlib>=1.2.1
+qrcode>=7.4.2
+
+# Database
+asyncpg>=0.29.0
+sqlalchemy[asyncio]>=2.0.0
+alembic>=1.12.0
+psycopg2-binary>=2.9.9  # For RAG document loader
+
+# HTTP client
+httpx>=0.25.0
+aiohttp>=3.9.0  # DeepInfra API client (async)
+
+# Data validation
+pydantic>=2.4.0
+pydantic-settings>=2.0.0
+
+# RAG Framework
+haystack-ai>=2.11.0  # Updated for qdrant-haystack 9.2.0 compatibility
+qdrant-client>=1.10.0  # Updated for qdrant-haystack compatibility
+sentence-transformers>=2.2.2  # Updated to allow newer versions with torch 2.x support
+torch>=2.5.0  # Python 3.13+ compatible (droplet has 2.8.0+cpu installed)
+numpy>=1.24.0  # DeepInfra embedder and bakeoff scripts
+whoosh>=2.7.4  # Feature 3: BM25 keyword search index
+markdownify==0.11.6
+tqdm==4.66.1
+beautifulsoup4==4.12.3
+lxml>=5.3.0  # Feature 2: HTML/XML parser backend for BeautifulSoup (Python 3.13+ compatible)
+markdown-it-py==3.0.0  # Feature 2: Markdown parsing for heading extraction
+cachetools==5.3.2  # TTL cache for query results
+
+# Rate limiting
+fastapi-limiter>=0.1.5
+redis>=5.0.0
+
+# Feature 011: Document Ingestion & Batch Processing
+celery[redis]>=5.3.0  # Task queue for batch processing
+websockets>=12.0  # WebSocket support for real-time updates
+PyPDF2>=3.0.0  # PDF text extraction
+python-docx>=1.1.0  # Word document processing
+markdown>=3.5.0  # Markdown to HTML conversion
+cryptography>=41.0.0  # OAuth token encryption with PBKDF2
+
+# Feature 023: Template Workflow API
+openai>=1.0.0  # OpenRouter LLM integration via OpenAI SDK
+textstat>=0.7.3  # GDS content standards compliance (reading age, sentence length)
+
+# Feature 024: Template Workflow Playground
+boto3>=1.28.0  # S3/Spaces backups for prompt promotion
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+httpx>=0.25.0  # for TestClient
+pytest-mock>=3.12.0
+faker>=20.0.0
+jsonschema>=4.20.0  # Feature 2: Contract testing
+
+# Logging
+python-json-logger>=2.0.0
+
+# Development
+python-dotenv>=1.0.0
+tabulate>=0.9.0  # Embedding bakeoff reports
+# haystack-ai moved to RAG Framework section (line 28)
+qdrant-haystack>=9.0.0  # Updated for haystack-ai 2.11.0+ compatibility

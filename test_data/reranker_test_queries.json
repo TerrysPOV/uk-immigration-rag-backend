@@ -1,0 +1,132 @@
+[
+  {
+    "query_id": "q001",
+    "query_text": "What is a BNO visa?",
+    "documents": [
+      "The British National (Overseas) visa allows British nationals from Hong Kong to live, work and study in the UK. You can apply if you were born on or after 1 July 1997 and at least one of your parents has BNO status.",
+      "A Standard Visitor visa allows you to visit the UK for tourism, business meetings, or medical treatment. You cannot work or study on this visa.",
+      "The Skilled Worker visa replaced Tier 2 (General) in December 2020. It allows skilled workers to come to the UK to do an eligible job with an approved employer.",
+      "Python is a high-level programming language widely used in web development and data science.",
+      "The weather forecast predicts rain in London tomorrow with temperatures around 15°C."
+    ],
+    "relevance_scores": [3, 1, 0, 0, 0],
+    "category": "factual"
+  },
+  {
+    "query_id": "q002",
+    "query_text": "How do I apply for a Skilled Worker visa?",
+    "documents": [
+      "To apply for a Skilled Worker visa, you need a job offer from a UK employer with a valid sponsor licence. The job must meet the required skill level (RQF level 3 or above) and salary threshold of £38,700 per year or the 'going rate' for the job, whichever is higher.",
+      "You must complete the online application form on GOV.UK and pay the visa fee. You'll also need to pay the immigration health surcharge as part of your application.",
+      "Book a biometric appointment at a visa application centre to provide your fingerprints and photograph. You'll need to attend this appointment within 90 days of starting your application.",
+      "The Skilled Worker visa is a type of work visa that allows you to come to the UK if you have a job offer from an approved employer.",
+      "Visa application centres are located in major cities around the world. Check the GOV.UK website for your nearest location."
+    ],
+    "relevance_scores": [3, 3, 3, 2, 1],
+    "category": "procedural"
+  },
+  {
+    "query_id": "q003",
+    "query_text": "What documents do I need for Skilled Worker visa?",
+    "documents": [
+      "You must provide a valid Certificate of Sponsorship from your UK employer. This is a unique reference number that contains information about your job and sponsor.",
+      "Proof of English language ability is required unless you are exempt. You can prove this with an approved English language test or a degree taught in English.",
+      "Financial evidence showing you have at least £1,270 in savings for 28 consecutive days before applying, unless your sponsor certifies maintenance on your Certificate of Sponsorship.",
+      "A valid passport or travel document is required for all visa applications to the UK.",
+      "Your criminal record certificate from any country you've lived in for 12 months or more in the past 10 years may be required depending on your job role."
+    ],
+    "relevance_scores": [3, 3, 3, 2, 2],
+    "category": "procedural"
+  },
+  {
+    "query_id": "q004",
+    "query_text": "Can I switch from student visa to Skilled Worker?",
+    "documents": [
+      "You can switch from a Student visa to a Skilled Worker visa while in the UK. You don't need to return to your home country to apply.",
+      "To switch, you must have a valid job offer from a licensed sponsor and meet all Skilled Worker visa requirements including the salary threshold of £38,700 or the going rate.",
+      "You should apply before your current Student visa expires. The earliest you can apply is 3 months before your start date with your new employer.",
+      "A Student visa allows you to study in the UK at an approved institution. You can work part-time during term time (up to 20 hours per week) and full-time during holidays.",
+      "When switching from Student to Skilled Worker, you'll need to provide your Certificate of Sponsorship, proof of English, and evidence you meet the salary requirements."
+    ],
+    "relevance_scores": [3, 3, 3, 1, 3],
+    "category": "multi-hop"
+  },
+  {
+    "query_id": "q005",
+    "query_text": "What is the minimum salary for Skilled Worker visa?",
+    "documents": [
+      "The general salary threshold for a Skilled Worker visa is £38,700 per year. However, some jobs have a different 'going rate' based on occupation codes.",
+      "You must be paid at least the higher of £38,700 per year or the going rate for your occupation code. Going rates vary by job and are listed in the Immigration Rules Appendix Skilled Occupations.",
+      "New entrants (under 26 years old, recent graduates, or in certain occupations) can be paid 70% of the going rate or £30,960, whichever is higher.",
+      "Healthcare and education workers may have different salary requirements. Check the specific rules for your occupation on GOV.UK.",
+      "Salary is calculated based on basic gross pay (before tax) for a 37.5 hour working week. Overtime and bonuses are not included."
+    ],
+    "relevance_scores": [3, 3, 3, 2, 2],
+    "category": "factual"
+  },
+  {
+    "query_id": "q006",
+    "query_text": "How long does Skilled Worker visa processing take?",
+    "documents": [
+      "If you're applying from outside the UK, you'll usually get a decision within 3 weeks. Priority services are available for faster processing.",
+      "If you're applying from inside the UK (switching from another visa), the standard processing time is 8 weeks from your biometric appointment.",
+      "You can pay for priority service (5 working days) or super priority service (next working day) for an additional fee if applying from within the UK.",
+      "Processing times may be longer during peak periods or if your application requires additional checks for security or other reasons.",
+      "You'll be notified by email when a decision has been made on your application. You can then collect your biometric residence permit."
+    ],
+    "relevance_scores": [3, 3, 2, 2, 1],
+    "category": "procedural"
+  },
+  {
+    "query_id": "q007",
+    "query_text": "What is indefinite leave to remain?",
+    "documents": [
+      "Indefinite Leave to Remain (ILR) allows you to live and work in the UK permanently without time restrictions. It's also known as 'settlement' or 'permanent residence'.",
+      "You can apply for ILR after holding a Skilled Worker visa for 5 years continuously. You must meet residency requirements including not spending more than 180 days outside the UK in any 12-month period.",
+      "ILR holders have the right to work without restrictions, access public funds, and apply for British citizenship after holding ILR for 12 months.",
+      "To apply for ILR, you must pass the Life in the UK test and meet English language requirements at B1 level.",
+      "Once granted, ILR does not expire, but you should apply for a new biometric residence permit every 10 years to prove your status."
+    ],
+    "relevance_scores": [3, 3, 3, 2, 2],
+    "category": "factual"
+  },
+  {
+    "query_id": "q008",
+    "query_text": "Can my family come with me on Skilled Worker visa?",
+    "documents": [
+      "Your partner and children under 18 can apply as your dependants when you apply for a Skilled Worker visa. They'll need to apply separately but at the same time.",
+      "Dependants can work and study in the UK without restrictions. They don't need separate work authorization.",
+      "Each dependant must pay the visa fee and immigration health surcharge. They'll also need to prove your relationship (marriage certificate, birth certificates, etc.).",
+      "If you later want to bring family members after you've arrived in the UK, they can apply to join you as dependants at any time during your visa validity.",
+      "Dependants can apply for ILR at the same time as you, provided they've been in the UK for the required period and meet the residency requirements."
+    ],
+    "relevance_scores": [3, 2, 3, 2, 2],
+    "category": "multi-hop"
+  },
+  {
+    "query_id": "q009",
+    "query_text": "What is Certificate of Sponsorship?",
+    "documents": [
+      "A Certificate of Sponsorship (CoS) is a virtual document with a unique reference number assigned by your UK employer. It contains information about your job, salary, and sponsor details.",
+      "Your employer must have a valid sponsor licence from the Home Office to issue a Certificate of Sponsorship. Not all employers are licensed sponsors.",
+      "There are two types: defined CoS (for workers applying from outside the UK) and undefined CoS (for workers switching from within the UK).",
+      "The CoS is valid for 3 months from the date of issue. You must use it to apply for your visa within this time or it will expire.",
+      "Your employer assigns the CoS to you electronically. You don't receive a physical certificate - just the reference number which you enter in your visa application."
+    ],
+    "relevance_scores": [3, 3, 2, 2, 2],
+    "category": "factual"
+  },
+  {
+    "query_id": "q010",
+    "query_text": "How much is the immigration health surcharge?",
+    "documents": [
+      "The immigration health surcharge (IHS) is £1,035 per year for most visa applicants. You pay this upfront for the full length of your visa.",
+      "Students and their dependants pay a reduced rate of £776 per year. Health and care workers on the Health and Care Worker visa are exempt from the charge.",
+      "For a 3-year Skilled Worker visa, you would pay £3,105 (£1,035 × 3) as part of your visa application.",
+      "The IHS gives you access to the National Health Service (NHS) in the UK, the same as a UK resident. You can use NHS services without additional charges.",
+      "If your visa application is refused, you'll get a refund of the IHS but not the visa application fee."
+    ],
+    "relevance_scores": [3, 3, 3, 2, 1],
+    "category": "factual"
+  }
+]

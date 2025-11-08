@@ -1,0 +1,224 @@
+version: '3.8'
+
+# Nerdctl compose file for the UK Immigration Guidance System
+#
+# This configuration defines the backend services required to run the system on a
+# DigitalOcean droplet using containerd + nerdctl. It includes:
+# - Keycloak for OIDC authentication and RBAC
+# - oauth2-proxy for secure ingress
+# - PostgreSQL for shared database (Keycloak, documents, embeddings)
+# - Redis for middleware caching and session storage
+# - AnythingLLM Middleware (FastAPI) for RBAC routing
+# - AnythingLLM Production instance (backend + frontend)
+# - AnythingLLM Sandbox instance (backend + frontend, RBAC-gated)
+#
+# NOTES:
+# - Gov UI deployment is deferred until feature-ui-integration completion
+# - Production and Sandbox AnythingLLM instances share LEAN vector store and PostgreSQL
+# - Separate workspaces: govuk-prod (production), govuk-sandbox (sandbox)
+# - All secrets and configuration supplied via .env file
+
+networks:
+  govuk-network:
+    driver: bridge
+
+services:
+  # Note: PostgreSQL is running natively on the host (port 5432)
+  # Services connect to it using host.docker.internal or host network mode
+  # Required databases: keycloak, anythingllm_prod, anythingllm_sandbox, gov_ai_db
+
+  # Keycloak - Authentication and RBAC
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: govuk-keycloak
+    command: ["start-dev"]
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL_HOST: 172.17.0.1  # Host PostgreSQL via Docker bridge
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: postgres
+      KC_DB_PASSWORD: ${PGPASSWORD}
+      KC_HOSTNAME: ${KC_HOSTNAME}
+    extra_hosts:
+      - "host.docker.internal:172.17.0.1"
+    networks:
+      - govuk-network
+    ports:
+      - "8080:8080"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/realms/master || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis - Caching and session store for middleware
+  redis:
+    image: redis:7-alpine
+    container_name: govuk-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - govuk-network
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # AnythingLLM Production Backend
+  anythingllm-prod-backend:
+    image: mintplexlabs/anythingllm:latest
+    container_name: govuk-anythingllm-prod
+    environment:
+      SERVER_PORT: 3003
+      STORAGE_DIR: /app/server/storage
+      JWT_SECRET: ${ANYTHINGLLM_PROD_JWT_SECRET}
+      # Vector store connection (shared LEAN instance)
+      VECTOR_DB: lancedb
+      LANCE_DB_PATH: /vector-data
+      # PostgreSQL for metadata (host database)
+      DATABASE_CONNECTION_STRING: postgresql://postgres:${PGPASSWORD}@172.17.0.1:5432/anythingllm_prod
+    volumes:
+      - anythingllm-prod-storage:/app/server/storage
+      - lean-vectors:/vector-data:ro  # Shared read-only access to LEAN vectors
+    extra_hosts:
+      - "host.docker.internal:172.17.0.1"
+    networks:
+      - govuk-network
+    depends_on:
+      - redis
+    expose:
+      - "3003"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3003/api/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # AnythingLLM Sandbox Backend (RBAC-gated for developers)
+  anythingllm-sandbox-backend:
+    image: mintplexlabs/anythingllm:latest
+    container_name: govuk-anythingllm-sandbox
+    environment:
+      SERVER_PORT: 7781
+      STORAGE_DIR: /app/server/storage
+      JWT_SECRET: ${ANYTHINGLLM_SANDBOX_JWT_SECRET}
+      # Vector store connection (shared LEAN instance)
+      VECTOR_DB: lancedb
+      LANCE_DB_PATH: /vector-data
+      # PostgreSQL for metadata (host database, separate workspace)
+      DATABASE_CONNECTION_STRING: postgresql://postgres:${PGPASSWORD}@172.17.0.1:5432/anythingllm_sandbox
+    volumes:
+      - anythingllm-sandbox-storage:/app/server/storage
+      - lean-vectors:/vector-data:ro  # Shared read-only access to LEAN vectors
+    extra_hosts:
+      - "host.docker.internal:172.17.0.1"
+    networks:
+      - govuk-network
+    depends_on:
+      - redis
+    expose:
+      - "7781"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:7781/api/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # AnythingLLM Middleware (FastAPI) - RBAC routing layer
+  anythingllm-middleware:
+    build:
+      context: ..
+      dockerfile: infra/middleware/Dockerfile
+    container_name: govuk-middleware
+    environment:
+      PORT: 8001
+      # Production AnythingLLM instance
+      ANYTHINGLLM_URL: http://anythingllm-prod-backend:3003
+      ANYTHINGLLM_API_KEY: ${ANYTHINGLLM_API_KEY}
+      ANYTHINGLLM_WORKSPACE: govuk-prod
+      # Sandbox AnythingLLM instance
+      ANYTHINGLLM_SANDBOX_URL: http://anythingllm-sandbox-backend:7781
+      ANYTHINGLLM_SANDBOX_API_KEY: ${ANYTHINGLLM_SANDBOX_API_KEY}
+      ANYTHINGLLM_SANDBOX_WORKSPACE: govuk-sandbox
+      # Redis connection
+      REDIS_URL: redis://redis:6379
+      # Database connection (host database)
+      DATABASE_URL: postgresql+asyncpg://postgres:${PGPASSWORD}@172.17.0.1:5432/gov_ai_db
+      # Feature flags
+      LLM_SANDBOX_ENABLED: ${LLM_SANDBOX_ENABLED:-true}
+      LLM_COMPARE_ENABLED: ${LLM_COMPARE_ENABLED:-true}
+      # Circuit breaker and rate limiting
+      CIRCUIT_BREAKER_ENABLED: ${CIRCUIT_BREAKER_ENABLED:-true}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+    extra_hosts:
+      - "host.docker.internal:172.17.0.1"
+    networks:
+      - govuk-network
+    depends_on:
+      - anythingllm-prod-backend
+      - anythingllm-sandbox-backend
+      - redis
+    ports:
+      - "8001:8001"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # oauth2-proxy - Secure ingress layer
+  oauth2_proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    container_name: govuk-oauth2-proxy
+    command:
+      - "--config=/etc/oauth2-proxy.cfg"
+    volumes:
+      - ./oauth2-proxy.cfg:/etc/oauth2-proxy.cfg:ro
+    environment:
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+      OAUTH2_PROXY_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${KEYCLOAK_ISSUER}
+      OAUTH2_PROXY_REDIRECT_URL: ${PROXY_REDIRECT}
+      OAUTH2_PROXY_UPSTREAMS: http://anythingllm-middleware:8001
+    ports:
+      - "4180:4180"
+    networks:
+      - govuk-network
+    depends_on:
+      - keycloak
+      - anythingllm-middleware
+    restart: always
+
+volumes:
+  # Note: PostgreSQL is running natively on host - no container volume needed
+
+  # Redis persistent data
+  redis-data:
+    driver: local
+
+  # AnythingLLM Production storage (configs, uploads, workspace settings)
+  anythingllm-prod-storage:
+    driver: local
+
+  # AnythingLLM Sandbox storage (separate configs, uploads, workspace settings)
+  anythingllm-sandbox-storage:
+    driver: local
+
+  # LEAN vector store (shared between production and sandbox)
+  # This volume should be mounted from the existing LEAN service running on droplet
+  lean-vectors:
+    driver: local
+    driver_opts:
+      type: none
+      device: /opt/gov-ai/vector-data  # Path to existing LEAN vector data on droplet
+      o: bind
