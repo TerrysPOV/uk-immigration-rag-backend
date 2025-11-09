@@ -500,8 +500,8 @@ If no entities found, return: {{"requirements": [], "conditions": [], "processes
 
     def _generate_entity_id(self, doc_id: str, text: str, entity_type: str) -> str:
         """Generate deterministic entity ID based on content."""
-        # Use hash of text + type for deterministic IDs
-        content_hash = hashlib.md5(f"{text}:{entity_type}".encode()).hexdigest()[:12]
+        # Use SHA256 hash of text + type for deterministic IDs (not for security, for uniqueness)
+        content_hash = hashlib.sha256(f"{text}:{entity_type}".encode()).hexdigest()[:12]
         return f"{entity_type}_{content_hash}"
 
 

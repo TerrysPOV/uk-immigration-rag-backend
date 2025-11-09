@@ -15,11 +15,12 @@ All endpoints return JSON with appropriate HTTP status codes.
 import os
 import logging
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, HTTPException, status, BackgroundTasks, Depends, Query
 from pydantic import BaseModel, Field
 
 from src.services.neo4j_graph_service import get_graph_service
 from src.services.neo4j_graph_retriever import get_graph_retriever
+from src.middleware.rbac import get_current_user, get_current_user_optional
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +77,10 @@ class GraphHealthResponse(BaseModel):
 class QueryGraphRequest(BaseModel):
     """Request for graph-augmented RAG query."""
 
-    query: str = Field(..., description="Natural language query")
+    query: str = Field(..., min_length=1, max_length=1000, description="Natural language query")
     use_graph: bool = Field(True, description="Enable graph traversal retrieval")
-    max_graph_depth: int = Field(3, description="Maximum graph traversal depth")
-    top_k: int = Field(5, description="Number of results to return")
+    max_graph_depth: int = Field(3, ge=1, le=5, description="Maximum graph traversal depth")
+    top_k: int = Field(5, ge=1, le=100, description="Number of results to return")
 
 
 class QueryGraphResponse(BaseModel):
@@ -114,9 +115,11 @@ class VisualizationDataResponse(BaseModel):
 class EntitySearchRequest(BaseModel):
     """Entity search request."""
 
-    search_term: str = Field(..., description="Search query")
-    entity_types: Optional[List[str]] = Field(None, description="Filter by entity types")
-    limit: int = Field(20, description="Maximum results")
+    search_term: str = Field(..., min_length=1, max_length=200, description="Search query")
+    entity_types: Optional[List[str]] = Field(
+        None, max_items=10, description="Filter by entity types"
+    )
+    limit: int = Field(20, ge=1, le=100, description="Maximum results")
 
 
 class EntitySearchResponse(BaseModel):
@@ -177,6 +180,7 @@ def get_neo4j_config() -> Dict[str, str]:
 async def trigger_graph_extraction(
     request: GraphExtractionRequest,
     background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
 ):
     """
     Trigger entity extraction and graph population.
@@ -273,7 +277,9 @@ async def get_graph_health():
 
 
 @router.post("/query", response_model=QueryGraphResponse)
-async def query_with_graph(request: QueryGraphRequest):
+async def query_with_graph(
+    request: QueryGraphRequest, user: dict = Depends(get_current_user_optional)
+):
     """
     RAG query with optional graph traversal.
 
@@ -370,7 +376,9 @@ async def get_entity_details(entity_id: str):
 
 
 @router.get("/visualize/{entity_id}", response_model=VisualizationDataResponse)
-async def visualize_entity_graph(entity_id: str, depth: int = 2):
+async def visualize_entity_graph(
+    entity_id: str, depth: int = Query(2, ge=1, le=4, description="Traversal depth")
+):
     """
     Return graph data for visualization (nodes, edges).
 
@@ -395,7 +403,9 @@ async def visualize_entity_graph(entity_id: str, depth: int = 2):
 
 
 @router.post("/search", response_model=EntitySearchResponse)
-async def search_entities(request: EntitySearchRequest):
+async def search_entities(
+    request: EntitySearchRequest, user: dict = Depends(get_current_user_optional)
+):
     """
     Search for entities by text/name.
 
